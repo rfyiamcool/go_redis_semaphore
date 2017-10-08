@@ -21,5 +21,6 @@ func main() {
 
 	token, _ := limiter.Acquire(0)
 	limiter.Release(token)
+	fmt.Println(limiter.ScanTimeoutToken())
 	fmt.Println("end")
 }

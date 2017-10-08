@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/garyburd/redigo/redis"
+	"strconv"
 	"time"
 )
 
@@ -54,25 +55,30 @@ func NewRedisPool(redis_conf RedisConfType) *redis.Pool {
 }
 
 type Semaphore struct {
-	Limit       int
-	RedisClient *redis.Pool
-	NameSpace   string
-	QueueName   string
-	LockName    string
-	LastScanTs  time.Time
-	LockTimeout int
-	Tokens      []string
+	Limit           int
+	LockTimeout     int
+	ScanInterval    int
+	RedisClient     *redis.Pool
+	NameSpace       string
+	QueueName       string
+	LockName        string
+	TokenTsHashName string
+	LastScanTs      time.Time
+	Tokens          []string
 }
 
+// NameSpace 推荐使用 自增的version版本号，不然会出现更改limit出现阈值不准的问题.
 func NewRedisSemaphore(redis_client *redis.Pool, limit int, namespace string) *Semaphore {
 	return &Semaphore{
-		Limit:         limit,
-		RedisClient:   redis_client,
-		NameSpace:     namespace,
-		QueueName:     namespace + "_" + "queue",
-		LockName:      namespace + "_" + "lock",
-		TokenTimeHash: namespace + "_" + "hash",
-		LockTimeout:   30,
+		Limit:           limit,
+		LockTimeout:     30,
+		ScanInterval:    5,
+		RedisClient:     redis_client,
+		NameSpace:       namespace,
+		QueueName:       namespace + "_" + "queue",
+		LockName:        namespace + "_" + "lock",
+		TokenTsHashName: namespace + "_" + "hash",
+		LastScanTs:      time.Now(),
 	}
 }
 
@@ -93,26 +99,29 @@ func (s *Semaphore) Init() {
 	for i := 1; i <= s.Limit; i++ {
 		tmp_token = fmt.Sprintf("token_seq_%d", i)
 		s.Push(tmp_token)
+		s.Tokens = append(s.Tokens, tmp_token)
 	}
 
 	// del lock
 	// rc.Do("DEL", s.LockName)
 }
 
-func (s *Semaphore) ScanTimeout() {
-	// data := map[string]int{}
-	// res, _ := redis.StringMap(rc.Do("HGETALL", api_id))
+func (s *Semaphore) ScanTimeoutToken() []string {
+	rc := s.RedisClient.Get()
+	defer rc.Close()
 
-	// for _, status := range statusList {
-	// 	if _, ok := res[status]; ok {
-	// 		i, _ := strconv.Atoi(res[status])
-	// 		data[status] = i
-	// 	} else {
-	// 		data[status] = 0
-	// 	}
-	// }
+	expire_tokens := []string{}
+	res, _ := redis.StringMap(rc.Do("HGETALL", s.TokenTsHashName))
 
-	// return data
+	for token, ts_s := range res {
+		ts, _ := strconv.Atoi(ts_s)
+		diff_ts := time.Now().Sub(time.Unix(int64(ts), 0))
+		if int(diff_ts.Seconds()) > s.ScanInterval {
+			expire_tokens = append(expire_tokens, token)
+		}
+	}
+
+	return expire_tokens
 }
 
 func (s *Semaphore) TryLock(timeout int) (bool, error) {
@@ -130,6 +139,7 @@ func (s *Semaphore) TryLock(timeout int) (bool, error) {
 	if err == redis.ErrNil {
 		return false, nil
 	}
+
 	if err != nil {
 		return false, err
 	}
@@ -157,13 +167,12 @@ func (s *Semaphore) Pop() (string, error) {
 	rc := s.RedisClient.Get()
 	defer rc.Close()
 
-	res, err := redis.String(rc.Do("LPOP", s.NameSpace))
+	res, err := redis.String(rc.Do("LPOP", s.QueueName))
 	// 允许队列为空值
 	if err == redis.ErrNil {
 		err = nil
 	}
 
-	fmt.Println(res, err)
 	return res, err
 }
 
@@ -172,6 +181,7 @@ func (s *Semaphore) Push(body string) (int, error) {
 	defer rc.Close()
 
 	res, err := redis.Int(rc.Do("RPUSH", s.QueueName, body))
+	rc.Do("HSET", s.TokenTsHashName, body, time.Now().Unix())
 	return res, err
 }
 
