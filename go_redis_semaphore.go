@@ -57,7 +57,10 @@ type Semaphore struct {
 	Limit       int
 	RedisClient *redis.Pool
 	NameSpace   string
+	QueueName   string
+	LockName    string
 	Tokens      []string
+	LockTimeout int
 }
 
 func NewRedisSemaphore(redis_client *redis.Pool, limit int, namespace string) *Semaphore {
@@ -65,24 +68,60 @@ func NewRedisSemaphore(redis_client *redis.Pool, limit int, namespace string) *S
 		Limit:       limit,
 		RedisClient: redis_client,
 		NameSpace:   namespace,
+		QueueName:   namespace + "_" + "queue",
+		LockName:    namespace + "_" + "lock",
+		LockTimeout: 30,
 	}
 }
 
 func (s *Semaphore) Init() {
-	// 初始化
+	rc := s.RedisClient.Get()
+	defer rc.Close()
+
 	var tmp_token string
 
+	ok, _ := s.TryLock(0)
+	if !ok {
+		fmt.Println("lock failed")
+		return
+	}
+
+	// clean old token list
+	rc.Do("DEL", s.QueueName)
 	for i := 1; i <= s.Limit; i++ {
 		tmp_token = fmt.Sprintf("token_seq_%d", i)
 		s.Push(tmp_token)
 	}
+
+	// del lock
+	// rc.Do("DEL", s.LockName)
+}
+
+func (s *Semaphore) TryLock(timeout int) (bool, error) {
+	rc := s.RedisClient.Get()
+	defer rc.Close()
+
+	var err error
+
+	if timeout == 0 {
+		_, err = redis.String(rc.Do("SET", s.LockName, "locked", "NX"))
+	} else {
+		_, err = redis.String(rc.Do("SET", s.LockName, "locked", "EX", s.LockTimeout, "NX"))
+	}
+
+	if err == redis.ErrNil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Semaphore) Acquire(timeout int) (string, error) {
 	var token string
 	var err error
 
-	fmt.Println(timeout)
 	if timeout > 0 {
 		token, err = s.PopBlock(timeout)
 	} else {
@@ -113,7 +152,7 @@ func (s *Semaphore) Push(body string) (int, error) {
 	rc := s.RedisClient.Get()
 	defer rc.Close()
 
-	res, err := redis.Int(rc.Do("RPUSH", s.NameSpace, body))
+	res, err := redis.Int(rc.Do("RPUSH", s.QueueName, body))
 	return res, err
 }
 
@@ -122,13 +161,13 @@ func (s *Semaphore) PopBlock(timeout int) (string, error) {
 	defer rc.Close()
 
 	// refer: https://gowalker.org/github.com/BPing/Golib/cache/mredis#RedisPool_BLPop
-	res_map, err := redis.StringMap(rc.Do("BLPOP", s.NameSpace, timeout))
+	res_map, err := redis.StringMap(rc.Do("BLPOP", s.QueueName, timeout))
 	// 允许队列为空值
 	if err == redis.ErrNil {
 		err = nil
 	}
 
-	res, ok := res_map[s.NameSpace]
+	res, ok := res_map[s.QueueName]
 	if !ok {
 		return "", err
 	}

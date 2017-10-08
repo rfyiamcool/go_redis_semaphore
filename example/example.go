@@ -19,6 +19,7 @@ func main() {
 	limiter := go_redis_semaphore.NewRedisSemaphore(redis_client, 2, "love")
 	limiter.Init()
 
-	limiter.Acquire(0)
+	token, _ := limiter.Acquire(0)
+	limiter.Release(token)
 	fmt.Println("end")
 }
