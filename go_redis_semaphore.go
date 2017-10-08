@@ -59,18 +59,20 @@ type Semaphore struct {
 	NameSpace   string
 	QueueName   string
 	LockName    string
-	Tokens      []string
+	LastScanTs  time.Time
 	LockTimeout int
+	Tokens      []string
 }
 
 func NewRedisSemaphore(redis_client *redis.Pool, limit int, namespace string) *Semaphore {
 	return &Semaphore{
-		Limit:       limit,
-		RedisClient: redis_client,
-		NameSpace:   namespace,
-		QueueName:   namespace + "_" + "queue",
-		LockName:    namespace + "_" + "lock",
-		LockTimeout: 30,
+		Limit:         limit,
+		RedisClient:   redis_client,
+		NameSpace:     namespace,
+		QueueName:     namespace + "_" + "queue",
+		LockName:      namespace + "_" + "lock",
+		TokenTimeHash: namespace + "_" + "hash",
+		LockTimeout:   30,
 	}
 }
 
@@ -95,6 +97,22 @@ func (s *Semaphore) Init() {
 
 	// del lock
 	// rc.Do("DEL", s.LockName)
+}
+
+func (s *Semaphore) ScanTimeout() {
+	// data := map[string]int{}
+	// res, _ := redis.StringMap(rc.Do("HGETALL", api_id))
+
+	// for _, status := range statusList {
+	// 	if _, ok := res[status]; ok {
+	// 		i, _ := strconv.Atoi(res[status])
+	// 		data[status] = i
+	// 	} else {
+	// 		data[status] = 0
+	// 	}
+	// }
+
+	// return data
 }
 
 func (s *Semaphore) TryLock(timeout int) (bool, error) {
@@ -122,6 +140,7 @@ func (s *Semaphore) Acquire(timeout int) (string, error) {
 	var token string
 	var err error
 
+	// ScanTimeout
 	if timeout > 0 {
 		token, err = s.PopBlock(timeout)
 	} else {
