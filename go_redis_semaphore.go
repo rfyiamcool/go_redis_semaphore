@@ -3,13 +3,16 @@ package go_redis_semaphore
 import (
 	"errors"
 	"fmt"
-	"github.com/garyburd/redigo/redis"
 	"strconv"
+	"sync"
 	"time"
+
+	"github.com/garyburd/redigo/redis"
 )
 
 const (
 	PREFIX_KYE = "redis_semaphore_"
+	VERSION    = "v0.1"
 )
 
 var (
@@ -56,23 +59,31 @@ func NewRedisPool(redis_conf RedisConfType) *redis.Pool {
 
 type Semaphore struct {
 	Limit           int
-	LockTimeout     int
-	ScanInterval    int
-	RedisClient     *redis.Pool
+	InitLockTimeout int
+
+	ScanLock     *sync.RWMutex
+	ScanInterval int // 每 多少秒 扫描一次
+	ScanTimeout  int // 多少算超时
+	LastScanTs   time.Time
+
+	RedisClient *redis.Pool
+
 	NameSpace       string
 	QueueName       string
 	LockName        string
 	TokenTsHashName string
-	LastScanTs      time.Time
-	Tokens          []string
+
+	Tokens []string
 }
 
 // NameSpace 推荐使用 自增的version版本号，不然会出现更改limit出现阈值不准的问题.
 func NewRedisSemaphore(redis_client *redis.Pool, limit int, namespace string) *Semaphore {
 	return &Semaphore{
 		Limit:           limit,
-		LockTimeout:     30,
+		ScanLock:        new(sync.RWMutex),
+		InitLockTimeout: 30,
 		ScanInterval:    5,
+		ScanTimeout:     3,
 		RedisClient:     redis_client,
 		NameSpace:       namespace,
 		QueueName:       namespace + "_" + "queue",
@@ -106,20 +117,38 @@ func (s *Semaphore) Init() {
 	// rc.Do("DEL", s.LockName)
 }
 
+func (s *Semaphore) ScanIsContinue() bool {
+	now := time.Now()
+	if int(now.Sub(s.LastScanTs).Seconds()) < s.ScanInterval {
+		return false
+	}
+	return true
+}
+
 func (s *Semaphore) ScanTimeoutToken() []string {
 	rc := s.RedisClient.Get()
 	defer rc.Close()
 
 	expire_tokens := []string{}
+
+	s.ScanLock.Lock()
+
+	if !s.ScanIsContinue() {
+		s.ScanLock.Unlock()
+		return expire_tokens
+	}
+
 	res, _ := redis.StringMap(rc.Do("HGETALL", s.TokenTsHashName))
 
 	for token, ts_s := range res {
 		ts, _ := strconv.Atoi(ts_s)
 		diff_ts := time.Now().Sub(time.Unix(int64(ts), 0))
-		if int(diff_ts.Seconds()) > s.ScanInterval {
+		if int(diff_ts.Seconds()) > s.ScanTimeout {
 			expire_tokens = append(expire_tokens, token)
 		}
 	}
+	s.LastScanTs = time.Now()
+	s.ScanLock.Unlock()
 
 	return expire_tokens
 }
@@ -133,7 +162,7 @@ func (s *Semaphore) TryLock(timeout int) (bool, error) {
 	if timeout == 0 {
 		_, err = redis.String(rc.Do("SET", s.LockName, "locked", "NX"))
 	} else {
-		_, err = redis.String(rc.Do("SET", s.LockName, "locked", "EX", s.LockTimeout, "NX"))
+		_, err = redis.String(rc.Do("SET", s.LockName, "locked", "EX", s.InitLockTimeout, "NX"))
 	}
 
 	if err == redis.ErrNil {
@@ -150,7 +179,7 @@ func (s *Semaphore) Acquire(timeout int) (string, error) {
 	var token string
 	var err error
 
-	// ScanTimeout
+	s.ScanTimeoutToken()
 	if timeout > 0 {
 		token, err = s.PopBlock(timeout)
 	} else {
@@ -173,6 +202,7 @@ func (s *Semaphore) Pop() (string, error) {
 		err = nil
 	}
 
+	rc.Do("HSET", s.TokenTsHashName, res, time.Now().Unix())
 	return res, err
 }
 
@@ -181,7 +211,7 @@ func (s *Semaphore) Push(body string) (int, error) {
 	defer rc.Close()
 
 	res, err := redis.Int(rc.Do("RPUSH", s.QueueName, body))
-	rc.Do("HSET", s.TokenTsHashName, body, time.Now().Unix())
+	rc.Do("HDEL", s.TokenTsHashName, body)
 	return res, err
 }
 
@@ -197,6 +227,10 @@ func (s *Semaphore) PopBlock(timeout int) (string, error) {
 	}
 
 	res, ok := res_map[s.QueueName]
+	if res != "" {
+		rc.Do("HSET", s.TokenTsHashName, res, time.Now().Unix())
+	}
+
 	if !ok {
 		return "", err
 	}
