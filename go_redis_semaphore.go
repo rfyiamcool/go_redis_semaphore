@@ -63,6 +63,7 @@ func (s *Semaphore) Init() {
 	}
 
 	// clean old token list
+	// to do: pipeline
 	rc.Do("DEL", s.QueueName)
 	for i := 1; i <= s.Limit; i++ {
 		tmp_token = fmt.Sprintf("token_seq_%d", i)
@@ -167,6 +168,7 @@ func (s *Semaphore) Push(body string) (int, error) {
 	rc := s.RedisClient.Get()
 	defer rc.Close()
 
+	// to do: pipeline
 	res, err := redis.Int(rc.Do("RPUSH", s.QueueName, body))
 	rc.Do("HDEL", s.TokenTsHashName, body)
 	return res, err
