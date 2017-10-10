@@ -2,7 +2,28 @@
 
 使用redis实现分布式信号量，在多机环境下下可以控制并发.
 
-example:
+
+#### Usage:
+
+
+```
+limiter := go_redis_semaphore.NewRedisSemaphore(redis连接池对象, 信号量数目, "redis key的名字")
+
+// 初始化redis
+limiter.Init()
+
+// 非阻塞拿锁
+token, _ := limiter.Acquire(0)
+
+// 超时5s阻塞拿锁
+token, _ := limiter.Acquire(5)
+
+// 释放锁
+limiter.Release(token)
+```
+
+
+#### example:
 
 ```
 package main
@@ -28,7 +49,7 @@ func main() {
 	limiter := go_redis_semaphore.NewRedisSemaphore(redis_client, 2, "love")
 	limiter.Init()
 
-	fmt.Println("拿锁")
+	fmt.Println("非阻塞拿锁")
 	token, _ := limiter.Acquire(0)
 
 	fmt.Println("释放锁")
